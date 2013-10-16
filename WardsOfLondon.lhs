@@ -1,3 +1,11 @@
+I had a fun weekend analysing parking data in Westminster (in the UK for clarity) along with
+
+* Amit Nandi
+* Bart Baddeley
+* Jackie Steinitz
+* Ian Ozsvald
+* Mateusz Łapsa-Malawski
+
 > {-# OPTIONS_GHC -Wall                     #-}
 > {-# OPTIONS_GHC -fno-warn-name-shadowing  #-}
 >
@@ -8,7 +16,7 @@
 > import Data.Binary.Get
 > import qualified Data.ByteString.Lazy as BL
 > import Data.Binary.IEEE754
-> import Data.Word( Word32 )
+> import Data.Word ( Word32 )
 > import Control.Monad
 > import Diagrams.Prelude
 > import Diagrams.Backend.SVG.CmdLine
@@ -18,14 +26,14 @@
 > prefix :: FilePath
 > prefix = "/Users/dom"
 >
-> prefix1 :: FilePath
-> prefix1 = "Downloadable/DataScienceLondon"
+> dataDir :: FilePath
+> dataDir = "Downloadable/DataScienceLondon"
 >
-> prefix2 :: FilePath
-> prefix2 = "WestMinster"
+> borough :: FilePath
+> borough = "WestMinster"
 >
 > flGL :: FilePath
-> flGL = prefix </> prefix1 </> "GreaterLondonRoads.shp"
+> flGL = prefix </> dataDir </> "GreaterLondonRoads.shp"
 
 > getPair :: Get a -> Get (a,a)
 > getPair getPart = do
@@ -60,8 +68,8 @@
 >   points <- replicateM (fromIntegral nPoints) (getPair getFloat64le)
 >   return (bb, nParts, nPoints, parts, points)
 >
-> foo :: Colour Double -> [(Double, Double)] -> Diagram SVG R2
-> foo lineColour xs = (fromVertices $ map p2 xs) # lw 0.0001 # lc lineColour
+> colouredLine :: Colour Double -> [(Double, Double)] -> Diagram SVG R2
+> colouredLine lineColour xs = (fromVertices $ map p2 xs) # lw 0.0001 # lc lineColour
 >
 > getBBs :: BL.ByteString -> BBox (Double, Double)
 > getBBs = runGet $ do
@@ -82,7 +90,7 @@
 >
 > processWard :: [ShpRec] -> FilePath -> IO ([ShpRec], [(Double, Double)])
 > processWard recDB fileName = do
->   input <- BL.readFile $ prefix </> prefix1 </> prefix2 </> fileName
+>   input <- BL.readFile $ prefix </> dataDir </> borough </> fileName
 >   let (hdr, recs) = runGet getShpFile input
 >       ns          = map (shpRecSizeBytes . shpRecHdr) $ recs
 >       bb          = shpFileBBox hdr
@@ -92,7 +100,7 @@
 >
 > main :: IO ()
 > main = do
->   fs <- getDirectoryContents $ prefix </> prefix1 </> prefix2
+>   fs <- getDirectoryContents $ prefix </> dataDir </> borough
 >   let gs = map (uncurry addExtension) $
 >            filter ((==".shp"). snd) $
 >            map splitExtension fs
@@ -109,6 +117,8 @@
 >
 >   let xs = zipWith getRecs nsGL (map shpRecData recsFiltered)
 >       f (_, _, _, _, ps) = ps
->       p = map (foo blue . f) xs
+>       p = map (colouredLine blue . f) xs
 >
->   defaultMain (mconcat (zipWith foo (cycle [red, yellow]) (map snd rps)) <> mconcat p)
+>   defaultMain $
+>     mconcat (zipWith colouredLine (cycle [red, yellow]) (map snd rps)) <>
+>     mconcat p
