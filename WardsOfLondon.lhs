@@ -1,10 +1,23 @@
-I had a fun weekend analysing parking data in Westminster (in the UK for clarity) along with
+
+I had a fun weekend analysing car parking data in Westminster (in the
+UK for clarity) at the [Future Cities
+Hackathon](http://futurecitieshackathon.com) along with
 
 * Amit Nandi
 * Bart Baddeley
 * Jackie Steinitz
-* Ian Ozsvald
+* [Ian Ozsvald](https://twitter.com/ianozsvald)
 * Mateusz Łapsa-Malawski
+
+Our analysis gained an honourable mention. Ian has produced a great
+[write-up](http://ianozsvald.com/2013/10/07/future-cities-hackathon-ds_ldn-oct-2013-on-parking-usage-inefficiencies)
+of our analysis with fine watercolour maps and Bart's time-lapse video
+of parking behaviour.
+
+We mainly used Python, [Pandas](http://pandas.pydata.org) and Excel
+for the actual analysis.
+
+I thought it would be an interesting exercise to recreate some of the analysis in Haskell.
 
 > {-# OPTIONS_GHC -Wall                     #-}
 > {-# OPTIONS_GHC -fno-warn-name-shadowing  #-}
