@@ -19,8 +19,12 @@ for the actual analysis.
 
 I thought it would be an interesting exercise to recreate some of the analysis in Haskell.
 
-> {-# OPTIONS_GHC -Wall                     #-}
-> {-# OPTIONS_GHC -fno-warn-name-shadowing  #-}
+> {-# OPTIONS_GHC -Wall                    #-}
+> {-# OPTIONS_GHC -fno-warn-name-shadowing #-}
+> {-# OPTIONS_GHC -fno-warn-orphans        #-}
+>
+> {-# LANGUAGE ScopedTypeVariables          #-}
+> {-# LANGUAGE OverloadedStrings            #-}
 >
 > module Main (main) where
 >
@@ -30,11 +34,18 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 > import qualified Data.ByteString.Lazy as BL
 > import Data.Binary.IEEE754
 > import Data.Word ( Word32 )
+> import Data.Csv
+> import qualified Data.Vector as V
+> import Data.Time
+>
 > import Control.Monad
+>
 > import Diagrams.Prelude
 > import Diagrams.Backend.SVG.CmdLine
+>
 > import System.FilePath
 > import System.Directory
+> import System.Locale
 >
 > prefix :: FilePath
 > prefix = "/Users/dom"
@@ -47,7 +58,10 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 >
 > flGL :: FilePath
 > flGL = prefix </> dataDir </> "GreaterLondonRoads.shp"
-
+>
+> flParkingCashless :: FilePath
+> flParkingCashless = "ParkingCashlessDenormHead.csv"
+>
 > getPair :: Get a -> Get (a,a)
 > getPair getPart = do
 >     x <- getPart
@@ -108,11 +122,52 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 >       ns          = map (shpRecSizeBytes . shpRecHdr) $ recs
 >       bb          = shpFileBBox hdr
 >   putStrLn $ show bb
->   let (_, _, _, _, ps)  = head $ zipWith getRecs ns  (map shpRecData $ recs)
+>   let (_, _, _, _, ps)  = head $ zipWith getRecs ns  (map shpRecData recs)
 >   return $ (recsOfInterest bb recDB, ps)
+>
+> columnNames :: [String]
+> columnNames = [ "amount paid"
+>               , "paid duration mins"
+>               , "start date"
+>               , "start day"
+>               , "end date"
+>               , "end day"
+>               , "start time"
+>               , "end time"
+>               , "DesignationType"
+>               , "Hours of Control"
+>               , "Tariff"
+>               , "Max Stay"
+>               , "Spaces"
+>               , "Street"
+>               , "x coordinate"
+>               , "y coordinate"
+>               , "latitude"
+>               , "longitude"
+>               ]
+>
+>
+> instance FromField UTCTime where
+>   parseField s = do
+>     f <- parseField s
+>     case parseTime defaultTimeLocale "%F %X" f of
+>       Nothing -> fail "Unable to parse UTC time"
+>       Just g  -> return g
 >
 > main :: IO ()
 > main = do
+>   parkingCashlessCsv <- BL.readFile $ prefix </> dataDir </> flParkingCashless
+>   case decode False parkingCashlessCsv of
+>     Left err -> putStrLn err
+>     Right v -> V.forM_ v $
+>                \( amountPaid        :: Float,
+>                   paidDurationsMins :: Int,
+>                   startDate         :: UTCTime
+>                 ) ->
+>                putStrLn $ show amountPaid ++ " Foo " ++
+>                           show paidDurationsMins ++ " bar " ++
+>                           show startDate
+>
 >   fs <- getDirectoryContents $ prefix </> dataDir </> borough
 >   let gs = map (uncurry addExtension) $
 >            filter ((==".shp"). snd) $
