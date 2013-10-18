@@ -23,8 +23,9 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 > {-# OPTIONS_GHC -fno-warn-name-shadowing #-}
 > {-# OPTIONS_GHC -fno-warn-orphans        #-}
 >
-> {-# LANGUAGE ScopedTypeVariables          #-}
-> {-# LANGUAGE OverloadedStrings            #-}
+> {-# LANGUAGE ScopedTypeVariables         #-}
+> {-# LANGUAGE OverloadedStrings           #-}
+> {-# LANGUAGE ViewPatterns                #-}
 >
 > module Main (main) where
 >
@@ -32,21 +33,25 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 >
 > import Data.Binary.Get
 > import qualified Data.ByteString.Lazy as BL
+> import qualified Data.ByteString as B
 > import Data.Binary.IEEE754
 > import Data.Word ( Word32 )
 > import Data.Csv
 > import qualified Data.Vector as V
 > import Data.Time
 > import qualified Data.Text as T
+> import Data.Char
 >
 > import Control.Monad
 >
 > import Diagrams.Prelude
-> import Diagrams.Backend.SVG.CmdLine
+> import Diagrams.Backend.Cairo.CmdLine
 >
 > import System.FilePath
 > import System.Directory
 > import System.Locale
+>
+> type Diag = Diagram Cairo R2
 >
 > prefix :: FilePath
 > prefix = "/Users/dom"
@@ -99,8 +104,12 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 >   points <- replicateM (fromIntegral nPoints) (getPair getFloat64le)
 >   return (bb, nParts, nPoints, parts, points)
 >
-> colouredLine :: Colour Double -> [(Double, Double)] -> Diagram SVG R2
+> colouredLine :: Colour Double -> [(Double, Double)] -> Diag
 > colouredLine lineColour xs = (fromVertices $ map p2 xs) # lw 0.0001 # lc lineColour
+>
+> bayDots :: V.Vector (Double, Double) -> Diag
+> bayDots xs = position (zip (map p2 $ V.toList xs) (repeat dot))
+>   where dot       = circle 0.001 # fc green
 >
 > getBBs :: BL.ByteString -> BBox (Double, Double)
 > getBBs = runGet $ do
@@ -129,26 +138,26 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 >   let (_, _, _, _, ps)  = head $ zipWith getRecs ns  (map shpRecData recs)
 >   return $ (recsOfInterest bb recDB, ps)
 >
-> columnNames :: [String]
-> columnNames = [ "amount paid"
->               , "paid duration mins"
->               , "start date"
->               , "start day"
->               , "end date"
->               , "end day"
->               , "start time"
->               , "end time"
->               , "DesignationType"
->               , "Hours of Control"
->               , "Tariff"
->               , "Max Stay"
->               , "Spaces"
->               , "Street"
->               , "x coordinate"
->               , "y coordinate"
->               , "latitude"
->               , "longitude"
->               ]
+> _columnNames :: [String]
+> _columnNames = [ "amount paid"
+>                , "paid duration mins"
+>                , "start date"
+>                , "start day"
+>                , "end date"
+>                , "end day"
+>                , "start time"
+>                , "end time"
+>                , "DesignationType"
+>                , "Hours of Control"
+>                , "Tariff"
+>                , "Max Stay"
+>                , "Spaces"
+>                , "Street"
+>                , "x coordinate"
+>                , "y coordinate"
+>                , "latitude"
+>                , "longitude"
+>                ]
 >
 > data DayOfTheWeek = Monday
 >                   | Tuesday
@@ -162,32 +171,41 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 > instance FromField DayOfTheWeek where
 >   parseField s = read <$> parseField s
 >
-> newtype LaxDouble = LaxDouble Double
+> newtype LaxDouble = LaxDouble { laxDouble :: Double }
 >   deriving Show
 >
 > instance FromField LaxDouble where
->   parseField s = (LaxDouble . read . f . T.unpack) <$> parseField s
+>   parseField = fmap LaxDouble . parseField . addLeading
+>
 >     where
->       f ('-':'.':xs) = '-':'0':'.':xs
->       f           xs = xs
+>
+>       addLeading :: B.ByteString -> B.ByteString
+>       addLeading bytes =
+>             case B.uncons bytes of
+>               Just (c -> '.', _)    -> B.cons (o '0') bytes
+>               Just (c -> '-', rest) -> B.cons (o '-') (addLeading rest)
+>               _ -> bytes
+>
+>       c = chr . fromIntegral
+>       o = fromIntegral . ord
 >
 > data Payment = Payment
->                { amountPaid       :: Float
->                , paidDurationMins :: Int
->                , startDate        :: UTCTime
->                , startDay         :: DayOfTheWeek
->                , endDate          :: UTCTime
->                , endDay           :: DayOfTheWeek
->                , startTime        :: TimeOfDay
->                , endTime          :: TimeOfDay
->                , designationType  :: T.Text
->                , hoursOfControl   :: T.Text
->                , tariff           :: Float
->                , maxStay          :: T.Text
->                , spaces           :: Int
->                , street           :: T.Text
->                , xCoordinate      :: Double
->                , yCoordinate      :: Double
+>                { _amountPaid       :: Float
+>                , _paidDurationMins :: Int
+>                , _startDate        :: UTCTime
+>                , _startDay         :: DayOfTheWeek
+>                , _endDate          :: UTCTime
+>                , _endDay           :: DayOfTheWeek
+>                , _startTime        :: TimeOfDay
+>                , _endTime          :: TimeOfDay
+>                , _designationType  :: T.Text
+>                , _hoursOfControl   :: T.Text
+>                , _tariff           :: Float
+>                , _maxStay          :: T.Text
+>                , _spaces           :: Int
+>                , _street           :: T.Text
+>                , _xCoordinate      :: Double
+>                , _yCoordinate      :: Double
 >                , latitude         :: Double
 >                , longitude        :: LaxDouble
 >                }
@@ -233,12 +251,20 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 >
 > main :: IO ()
 > main = do
->   parkingCashlessCsv <- BL.readFile $ prefix </> dataDir </> parkingBorough </> flParkingCashless
->   case decode False parkingCashlessCsv of
->     Left err -> putStrLn err
->     Right v -> V.forM_ v $
+>   parkingCashlessCsv <- BL.readFile $
+>                         prefix </>
+>                         dataDir </>
+>                         parkingBorough </>
+>                         flParkingCashless
+>
+>   parkBayCoords <- case decode False parkingCashlessCsv of
+>     Left err -> error err
+>     Right v -> V.forM v $
 >                \(v :: Payment) ->
->                putStrLn $ show v
+>                do let x = laxDouble $ longitude v
+>                       y = latitude v
+>                   putStrLn $ "(" ++ (show x) ++ ", " ++ (show y) ++ ")"
+>                   return (x, y)
 >
 >   fs <- getDirectoryContents $ prefix </> dataDir </> borough
 >   let gs = map (uncurry addExtension) $
@@ -261,6 +287,7 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 >
 >   defaultMain $
 >     mconcat (zipWith colouredLine (cycle [red, yellow]) (map snd rps)) <>
->     mconcat p
+>     -- mconcat p <>
+>     bayDots parkBayCoords
 
 http://www.bbc.co.uk/news/uk-england-london-19732371
