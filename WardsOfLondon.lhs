@@ -37,6 +37,7 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 > import Data.Csv
 > import qualified Data.Vector as V
 > import Data.Time
+> import qualified Data.Text as T
 >
 > import Control.Monad
 >
@@ -55,6 +56,9 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 >
 > borough :: FilePath
 > borough = "WestMinster"
+>
+> parkingBorough :: FilePath
+> parkingBorough = "ParkingWestminster"
 >
 > flGL :: FilePath
 > flGL = prefix </> dataDir </> "GreaterLondonRoads.shp"
@@ -146,6 +150,72 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 >               , "longitude"
 >               ]
 >
+> data DayOfTheWeek = Monday
+>                   | Tuesday
+>                   | Wednesday
+>                   | Thursday
+>                   | Friday
+>                   | Saturday
+>                   | Sunday
+>   deriving (Read, Show, Enum)
+>
+> instance FromField DayOfTheWeek where
+>   parseField s = read <$> parseField s
+>
+> newtype LaxDouble = LaxDouble Double
+>   deriving Show
+>
+> instance FromField LaxDouble where
+>   parseField s = (LaxDouble . read . f . T.unpack) <$> parseField s
+>     where
+>       f ('-':'.':xs) = '-':'0':'.':xs
+>       f           xs = xs
+>
+> data Payment = Payment
+>                { amountPaid       :: Float
+>                , paidDurationMins :: Int
+>                , startDate        :: UTCTime
+>                , startDay         :: DayOfTheWeek
+>                , endDate          :: UTCTime
+>                , endDay           :: DayOfTheWeek
+>                , startTime        :: TimeOfDay
+>                , endTime          :: TimeOfDay
+>                , designationType  :: T.Text
+>                , hoursOfControl   :: T.Text
+>                , tariff           :: Float
+>                , maxStay          :: T.Text
+>                , spaces           :: Int
+>                , street           :: T.Text
+>                , xCoordinate      :: Double
+>                , yCoordinate      :: Double
+>                , latitude         :: Double
+>                , longitude        :: LaxDouble
+>                }
+>   deriving Show
+>
+> instance FromRecord Payment where
+>   parseRecord v
+>          | V.length v == 18
+>          = Payment <$>
+>            v .!  0 <*>
+>            v .!  1 <*>
+>            v .!  2 <*>
+>            v .!  3 <*>
+>            v .!  4 <*>
+>            v .!  5 <*>
+>            v .!  6 <*>
+>            v .!  7 <*>
+>            v .!  8 <*>
+>            v .!  9 <*>
+>            v .! 10 <*>
+>            v .! 11 <*>
+>            v .! 12 <*>
+>            v .! 13 <*>
+>            v .! 14 <*>
+>            v .! 15 <*>
+>            v .! 16 <*>
+>            v .! 17
+>          | otherwise     = mzero
 >
 > instance FromField UTCTime where
 >   parseField s = do
@@ -154,19 +224,21 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 >       Nothing -> fail "Unable to parse UTC time"
 >       Just g  -> return g
 >
+> instance FromField TimeOfDay where
+>   parseField s = do
+>     f <- parseField s
+>     case parseTime defaultTimeLocale "%R" f of
+>       Nothing -> fail "Unable to parse time of day"
+>       Just g  -> return g
+>
 > main :: IO ()
 > main = do
->   parkingCashlessCsv <- BL.readFile $ prefix </> dataDir </> flParkingCashless
+>   parkingCashlessCsv <- BL.readFile $ prefix </> dataDir </> parkingBorough </> flParkingCashless
 >   case decode False parkingCashlessCsv of
 >     Left err -> putStrLn err
 >     Right v -> V.forM_ v $
->                \( amountPaid        :: Float,
->                   paidDurationsMins :: Int,
->                   startDate         :: UTCTime
->                 ) ->
->                putStrLn $ show amountPaid ++ " Foo " ++
->                           show paidDurationsMins ++ " bar " ++
->                           show startDate
+>                \(v :: Payment) ->
+>                putStrLn $ show v
 >
 >   fs <- getDirectoryContents $ prefix </> dataDir </> borough
 >   let gs = map (uncurry addExtension) $
@@ -190,3 +262,5 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 >   defaultMain $
 >     mconcat (zipWith colouredLine (cycle [red, yellow]) (map snd rps)) <>
 >     mconcat p
+
+http://www.bbc.co.uk/news/uk-england-london-19732371
