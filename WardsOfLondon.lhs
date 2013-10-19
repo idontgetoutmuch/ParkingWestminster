@@ -1,6 +1,6 @@
 
-I had a fun weekend analysing car parking data in Westminster (in the
-UK for clarity) at the [Future Cities
+I had a fun weekend analysing car parking data in
+[Westminster](http://www.westminster.gov.uk) at the [Future Cities
 Hackathon](http://futurecitieshackathon.com) along with
 
 * Amit Nandi
@@ -15,9 +15,11 @@ of our analysis with fine watercolour maps and Bart's time-lapse video
 of parking behaviour.
 
 We mainly used Python, [Pandas](http://pandas.pydata.org) and Excel
-for the actual analysis.
+for the actual analysis and [QGIS](http://qgis.org/en/site) for the maps.
 
 I thought it would be an interesting exercise to recreate some of the analysis in Haskell.
+
+First some pragmas and imports.
 
 > {-# OPTIONS_GHC -Wall                    #-}
 > {-# OPTIONS_GHC -fno-warn-name-shadowing #-}
@@ -26,6 +28,9 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 > {-# LANGUAGE ScopedTypeVariables         #-}
 > {-# LANGUAGE OverloadedStrings           #-}
 > {-# LANGUAGE ViewPatterns                #-}
+> {-# LANGUAGE DeriveTraversable           #-}
+> {-# LANGUAGE DeriveFoldable              #-}
+> {-# LANGUAGE DeriveFunctor               #-}
 >
 > module Main (main) where
 >
@@ -41,17 +46,22 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 > import Data.Time
 > import qualified Data.Text as T
 > import Data.Char
+> import Data.Maybe
 >
 > import Control.Monad
 >
 > import Diagrams.Prelude
-> import Diagrams.Backend.Cairo.CmdLine
+> import Diagrams.Backend.SVG.CmdLine
 >
 > import System.FilePath
 > import System.Directory
 > import System.Locale
 >
-> type Diag = Diagram Cairo R2
+> import Data.Traversable (Traversable)
+> import qualified Data.Traversable as Tr
+> import Data.Foldable (Foldable)
+>
+> type Diag = Diagram SVG R2
 >
 > prefix :: FilePath
 > prefix = "/Users/dom"
@@ -69,7 +79,10 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 > flGL = prefix </> dataDir </> "GreaterLondonRoads.shp"
 >
 > flParkingCashless :: FilePath
-> flParkingCashless = "ParkingCashlessDenormHead.csv"
+> flParkingCashless = "ParkingCashlessDenormHead100.csv"
+>
+> data Pair a = Pair { xPair :: a, yPair :: a }
+>   deriving (Show, Functor, Foldable, Traversable)
 >
 > getPair :: Get a -> Get (a,a)
 > getPair getPart = do
@@ -107,9 +120,10 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 > colouredLine :: Colour Double -> [(Double, Double)] -> Diag
 > colouredLine lineColour xs = (fromVertices $ map p2 xs) # lw 0.0001 # lc lineColour
 >
-> bayDots :: V.Vector (Double, Double) -> Diag
-> bayDots xs = position (zip (map p2 $ V.toList xs) (repeat dot))
->   where dot       = circle 0.001 # fc green
+> bayDots :: V.Vector (Pair Double) -> Diag
+> bayDots xs = position (zip (map p2 $ map toPair $ V.toList xs) (repeat dot))
+>   where dot      = circle 0.001 # fc green # lw 0.0
+>         toPair p = (xPair p, yPair p)
 >
 > getBBs :: BL.ByteString -> BBox (Double, Double)
 > getBBs = runGet $ do
@@ -190,7 +204,7 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 >       o = fromIntegral . ord
 >
 > data Payment = Payment
->                { _amountPaid       :: Float
+>                { _amountPaid       :: LaxDouble
 >                , _paidDurationMins :: Int
 >                , _startDate        :: UTCTime
 >                , _startDay         :: DayOfTheWeek
@@ -200,14 +214,14 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 >                , _endTime          :: TimeOfDay
 >                , _designationType  :: T.Text
 >                , _hoursOfControl   :: T.Text
->                , _tariff           :: Float
+>                , _tariff           :: Maybe Float
 >                , _maxStay          :: T.Text
 >                , _spaces           :: Int
 >                , _street           :: T.Text
->                , _xCoordinate      :: Double
->                , _yCoordinate      :: Double
->                , latitude         :: Double
->                , longitude        :: LaxDouble
+>                , _xCoordinate      :: Maybe Double
+>                , _yCoordinate      :: Maybe Double
+>                , latitude          :: Maybe Double
+>                , longitude         :: Maybe LaxDouble
 >                }
 >   deriving Show
 >
@@ -261,10 +275,16 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 >     Left err -> error err
 >     Right v -> V.forM v $
 >                \(v :: Payment) ->
->                do let x = laxDouble $ longitude v
+>                do let x = laxDouble <$> longitude v
 >                       y = latitude v
 >                   putStrLn $ "(" ++ (show x) ++ ", " ++ (show y) ++ ")"
 >                   return (x, y)
+>
+>   let parkBayCoords' :: V.Vector (Pair Double)
+>       parkBayCoords' = V.map fromJust $
+>                        V.filter isJust $
+>                        V.map Tr.sequence $
+>                        V.map (uncurry Pair) parkBayCoords
 >
 >   fs <- getDirectoryContents $ prefix </> dataDir </> borough
 >   let gs = map (uncurry addExtension) $
@@ -285,9 +305,12 @@ I thought it would be an interesting exercise to recreate some of the analysis i
 >       f (_, _, _, _, ps) = ps
 >       p = map (colouredLine blue . f) xs
 >
+>   _ <- error "Stop before drawing"
+>
 >   defaultMain $
 >     mconcat (zipWith colouredLine (cycle [red, yellow]) (map snd rps)) <>
->     -- mconcat p <>
->     bayDots parkBayCoords
+>     mconcat p <>
+>     bayDots parkBayCoords'
 
 http://www.bbc.co.uk/news/uk-england-london-19732371
+
