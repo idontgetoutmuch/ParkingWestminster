@@ -41,12 +41,14 @@ First some pragmas and imports.
 > import qualified Data.ByteString as B
 > import Data.Binary.IEEE754
 > import Data.Word ( Word32 )
-> import Data.Csv
+> import Data.Csv hiding ( decode )
+> import Data.Csv.Streaming
 > import qualified Data.Vector as V
 > import Data.Time
 > import qualified Data.Text as T
 > import Data.Char
-> import Data.Maybe
+> import qualified Data.Map.Strict as Map
+> import Data.Int( Int64 )
 >
 > import Control.Monad
 >
@@ -57,9 +59,9 @@ First some pragmas and imports.
 > import System.Directory
 > import System.Locale
 >
-> import Data.Traversable (Traversable)
+> import Data.Traversable ( Traversable )
 > import qualified Data.Traversable as Tr
-> import Data.Foldable (Foldable)
+> import Data.Foldable ( Foldable )
 >
 > type Diag = Diagram SVG R2
 >
@@ -79,10 +81,10 @@ First some pragmas and imports.
 > flGL = prefix </> dataDir </> "GreaterLondonRoads.shp"
 >
 > flParkingCashless :: FilePath
-> flParkingCashless = "ParkingCashlessDenormHead100.csv"
+> flParkingCashless = "ParkingCashlessDenorm.csv"
 >
-> data Pair a = Pair { xPair :: a, yPair :: a }
->   deriving (Show, Functor, Foldable, Traversable)
+> data Pair a = Pair { xPair :: !a, yPair :: !a }
+>   deriving (Show, Eq, Ord, Functor, Foldable, Traversable)
 >
 > getPair :: Get a -> Get (a,a)
 > getPair getPart = do
@@ -120,8 +122,8 @@ First some pragmas and imports.
 > colouredLine :: Colour Double -> [(Double, Double)] -> Diag
 > colouredLine lineColour xs = (fromVertices $ map p2 xs) # lw 0.0001 # lc lineColour
 >
-> bayDots :: V.Vector (Pair Double) -> Diag
-> bayDots xs = position (zip (map p2 $ map toPair $ V.toList xs) (repeat dot))
+> bayDots :: [Pair Double] -> Diag
+> bayDots xs = position (zip (map p2 $ map toPair xs) (repeat dot))
 >   where dot      = circle 0.001 # fc green # lw 0.0
 >         toPair p = (xPair p, yPair p)
 >
@@ -205,7 +207,7 @@ First some pragmas and imports.
 >
 > data Payment = Payment
 >                { _amountPaid       :: LaxDouble
->                , _paidDurationMins :: Int
+>                , paidDurationMins  :: Int
 >                , _startDate        :: UTCTime
 >                , _startDay         :: DayOfTheWeek
 >                , _endDate          :: UTCTime
@@ -214,9 +216,9 @@ First some pragmas and imports.
 >                , _endTime          :: TimeOfDay
 >                , _designationType  :: T.Text
 >                , _hoursOfControl   :: T.Text
->                , _tariff           :: Maybe Float
+>                , _tariff           :: T.Text
 >                , _maxStay          :: T.Text
->                , _spaces           :: Int
+>                , _spaces           :: Maybe Int
 >                , _street           :: T.Text
 >                , _xCoordinate      :: Maybe Double
 >                , _yCoordinate      :: Maybe Double
@@ -262,6 +264,21 @@ First some pragmas and imports.
 >     case parseTime defaultTimeLocale "%R" f of
 >       Nothing -> fail "Unable to parse time of day"
 >       Just g  -> return g
+
+-- The !'s are *really* important otherwise we get a space leak.
+
+> data LotStats = LotStats { usageCount :: !Int
+>                          , usageMins  :: !Int64
+>                          }
+>   deriving Show
+>
+> updateStats :: LotStats -> LotStats -> LotStats
+> updateStats s1 s2 = LotStats { usageCount = (usageCount s1) + (usageCount s2)
+>                              , usageMins  = (usageMins s1) +  (usageMins s2)
+>                              }
+>
+> bayCountMap :: Map.Map (Pair Double) LotStats
+> bayCountMap = Map.empty
 >
 > main :: IO ()
 > main = do
@@ -271,20 +288,24 @@ First some pragmas and imports.
 >                         parkingBorough </>
 >                         flParkingCashless
 >
->   parkBayCoords <- case decode False parkingCashlessCsv of
->     Left err -> error err
->     Right v -> V.forM v $
->                \(v :: Payment) ->
->                do let x = laxDouble <$> longitude v
->                       y = latitude v
->                   putStrLn $ "(" ++ (show x) ++ ", " ++ (show y) ++ ")"
->                   return (x, y)
+>   let loop m rs = case rs of
+>         Cons u rest -> case u of
+>           Left err ->  error err
+>           Right val -> case Tr.sequence $ Pair (laxDouble <$> longitude val) (latitude val) of
+>             Nothing -> loop m rest
+>             Just v  -> loop (Map.insertWith updateStats v delta m) rest
+>               where
+>                 delta = LotStats { usageCount = 1
+>                                  , usageMins  = fromIntegral $ paidDurationMins val
+>                                  }
+>         Nil mErr x  -> if BL.null x
+>                        then m
+>                        else error $ "Nil: " ++ show mErr ++ " " ++ show x
 >
->   let parkBayCoords' :: V.Vector (Pair Double)
->       parkBayCoords' = V.map fromJust $
->                        V.filter isJust $
->                        V.map Tr.sequence $
->                        V.map (uncurry Pair) parkBayCoords
+>   let baz = loop bayCountMap (decode False parkingCashlessCsv)
+>
+>   let parkBayCoords :: [Pair Double]
+>       parkBayCoords = Map.keys baz
 >
 >   fs <- getDirectoryContents $ prefix </> dataDir </> borough
 >   let gs = map (uncurry addExtension) $
@@ -305,12 +326,10 @@ First some pragmas and imports.
 >       f (_, _, _, _, ps) = ps
 >       p = map (colouredLine blue . f) xs
 >
->   _ <- error "Stop before drawing"
->
 >   defaultMain $
 >     mconcat (zipWith colouredLine (cycle [red, yellow]) (map snd rps)) <>
 >     mconcat p <>
->     bayDots parkBayCoords'
+>     bayDots parkBayCoords
 
 http://www.bbc.co.uk/news/uk-england-london-19732371
 
