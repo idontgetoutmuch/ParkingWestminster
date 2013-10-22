@@ -52,7 +52,6 @@ First some pragmas and imports.
 > import Data.Char
 > import qualified Data.Map.Strict as Map
 > import Data.Int( Int64 )
-> import Data.List ( nub )
 >
 > import Control.Applicative
 > import Control.Monad
@@ -87,6 +86,11 @@ First some pragmas and imports.
 >
 > flParkingCashless :: FilePath
 > flParkingCashless = "ParkingCashlessDenorm.csv"
+>
+> selectedDay :: UTCTime
+> selectedDay = case parseTime defaultTimeLocale "%F %X" "2013-02-28 00:00:00" of
+>   Nothing -> error "Unable to parse UTC time"
+>   Just t  -> t
 >
 > data Pair a = Pair { xPair :: !a, yPair :: !a }
 >   deriving (Show, Eq, Ord, Functor, Foldable, Traversable)
@@ -212,18 +216,18 @@ First some pragmas and imports.
 >
 > data Payment = Payment
 >                { _amountPaid       :: LaxDouble
->                , paidDurationMins  :: Int
->                , _startDate        :: UTCTime
+>                ,  paidDurationMins :: Int
+>                ,  startDate        :: UTCTime
 >                , _startDay         :: DayOfTheWeek
 >                , _endDate          :: UTCTime
 >                , _endDay           :: DayOfTheWeek
 >                , _startTime        :: TimeOfDay
 >                , _endTime          :: TimeOfDay
 >                , _designationType  :: T.Text
->                , hoursOfControl   :: T.Text
+>                ,  hoursOfControl   :: T.Text
 >                , _tariff           :: T.Text
 >                , _maxStay          :: T.Text
->                , _spaces           :: Maybe Int
+>                , spaces            :: Maybe Int
 >                , _street           :: T.Text
 >                , _xCoordinate      :: Maybe Double
 >                , _yCoordinate      :: Maybe Double
@@ -270,21 +274,22 @@ First some pragmas and imports.
 >       Nothing -> fail "Unable to parse time of day"
 >       Just g  -> return g
 
-It turns out that there are a very limited number of hours of control
-so rather than parse this and calculate the number of control minutes
-per week, we can just create a simple look up table by hand.
+It turns out that there are a very limited number of different sorts
+of hours of control so rather than parse this and calculate the number
+of control minutes per week, we can just create a simple look up table
+by hand.
 
-> hoursOfControlTable :: [(T.Text, Int)]
+> hoursOfControlTable :: [(T.Text, [Int])]
 > hoursOfControlTable = [
->     ("Mon - Fri 8.30am - 6.30pm"                      , 50 * 60)
->   , ("Mon-Fri 10am - 4pm"                             , 30 * 60)
->   , ("Mon - Fri 8.30-6.30 Sat 8.30 - 1.30"            , 55 * 60)
->   , ("Mon - Sat 8.30am - 6.30pm"                      , 60 * 60)
->   , ("Mon-Sat 11am-6.30pm "                           , 45 * 60)
->   , ("Mon - Fri 8.00pm - 8.00am"                      , 60 * 60)
->   , ("Mon - Fri 8.30am - 6.30pm "                     , 50 * 60)
->   , ("Mon - Fri 10.00am - 6.30pm\nSat 8.30am - 6.30pm", 85 * 30 + 10 * 60)
->   , ("Mon-Sun 10.00am-4.00pm & 7.00pm - Midnight"     , 77 * 60)
+>     ("Mon - Fri 8.30am - 6.30pm"                      , [600, 600, 600, 600, 600,   0,   0])
+>   , ("Mon-Fri 10am - 4pm"                             , [360, 360, 360, 360, 360,   0,   0])
+>   , ("Mon - Fri 8.30-6.30 Sat 8.30 - 1.30"            , [600, 600, 600, 600, 600, 300,   0])
+>   , ("Mon - Sat 8.30am - 6.30pm"                      , [600, 600, 600, 600, 600, 600,   0])
+>   , ("Mon-Sat 11am-6.30pm "                           , [450, 450, 450, 450, 450, 450,   0])
+>   , ("Mon - Fri 8.00pm - 8.00am"                      , [720, 720, 720, 720, 720,   0,   0])
+>   , ("Mon - Fri 8.30am - 6.30pm "                     , [600, 600, 600, 600, 600,   0,   0])
+>   , ("Mon - Fri 10.00am - 6.30pm\nSat 8.30am - 6.30pm", [510, 510, 510, 510, 510, 600,   0])
+>   , ("Mon-Sun 10.00am-4.00pm & 7.00pm - Midnight"     , [660, 660, 660, 660, 660, 660, 660])
 >   ]
 
 The !'s are *really* important otherwise we get a space leak. In more
@@ -295,20 +300,14 @@ unnecessary space) until needed.
 > data LotStats = LotStats { usageCount       :: !Int
 >                          , usageMins        :: !Int64
 >                          , usageControlTxt  :: !T.Text
->                          , usageControlMins :: !Int
 >                          }
 >   deriving Show
 >
 > updateStats :: LotStats -> LotStats -> LotStats
 > updateStats s1 s2 = LotStats { usageCount = (usageCount s1) + (usageCount s2)
 >                              , usageMins  = (usageMins s1) +  (usageMins s2)
->                              , usageControlTxt = usageControlTxt s2
->                              , usageControlMins = y
+>                              , usageControlTxt  = usageControlTxt s2
 >                              }
->   where
->     y = case lookup (usageControlTxt s2) hoursOfControlTable of
->           Nothing -> error $ "Looked up " ++ show (usageControlTxt s2)
->           Just x  -> x
 >
 > bayCountMap :: Map.Map (Pair Double) LotStats
 > bayCountMap = Map.empty
@@ -326,26 +325,54 @@ unnecessary space) until needed.
 >           Left err ->  error err
 >           Right val -> case Tr.sequence $ Pair (laxDouble <$> longitude val) (latitude val) of
 >             Nothing -> loop m rest
->             Just v  -> loop (Map.insertWith updateStats v delta m) rest
+>
+>             -- If the latitude and longitude were recorded then we can update our
+>             -- stats. To make the analysis simpler, we only record a single day.
+>
+>             Just v  -> if startDate val == selectedDay
+>                        then loop (Map.insertWith updateStats v delta m) rest
+>                        else loop m rest
 >               where
 >                 delta = LotStats { usageCount = 1
 >                                  , usageMins  = fromIntegral $ paidDurationMins val
 >                                  , usageControlTxt = hoursOfControl val
->                                  , usageControlMins = 0
 >                                  }
 >         Nil mErr x  -> if BL.null x
 >                        then m
 >                        else error $ "Nil: " ++ show mErr ++ " " ++ show x
 >
->   let baz = loop bayCountMap (decode False parkingCashlessCsv)
+>   let bayCountMap' = loop bayCountMap (decode False parkingCashlessCsv)
 >
->   mapM_ putStrLn $ nub $ map T.unpack $ map usageControlTxt $ Map.elems baz
->   mapM_ putStrLn $ map show $ map usageControlMins $ Map.elems baz
+>   putStrLn $ show bayCountMap'
+>
+>   -- Calculate the available parking minutes for a lot on our chosen
+>   -- day (a Thursday).
+>
+>   let availableMinsThu :: [Maybe Double]
+>       availableMinsThu =
+>         map (fmap fromIntegral) $
+>         map (fmap (!!(fromEnum Thursday))) $
+>         map (flip lookup hoursOfControlTable) $
+>         map usageControlTxt $
+>         Map.elems bayCountMap'
+>
+>       actualMinsThu :: [Double]
+>       actualMinsThu =
+>         map fromIntegral $
+>         map usageMins $
+>         Map.elems bayCountMap'
+>
+>       usage :: [Maybe Double]
+>       usage = zipWith f actualMinsThu availableMinsThu
+>         where
+>           f x y = (/) <$> pure x <*> y
+>
+>   mapM_ putStrLn $ map show usage
 >
 >   error "Stop here"
 >
 >   let parkBayCoords :: [Pair Double]
->       parkBayCoords = Map.keys baz
+>       parkBayCoords = Map.keys bayCountMap'
 >
 >   fs <- getDirectoryContents $ prefix </> dataDir </> borough
 >   let gs = map (uncurry addExtension) $
