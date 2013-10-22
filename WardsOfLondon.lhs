@@ -52,6 +52,7 @@ First some pragmas and imports.
 > import Data.Char
 > import qualified Data.Map.Strict as Map
 > import Data.Int( Int64 )
+> import Data.Maybe ( fromJust, isNothing )
 >
 > import Control.Applicative
 > import Control.Monad
@@ -128,13 +129,17 @@ First some pragmas and imports.
 >   points <- replicateM (fromIntegral nPoints) (getPair getFloat64le)
 >   return (bb, nParts, nPoints, parts, points)
 >
-> colouredLine :: Colour Double -> [(Double, Double)] -> Diag
-> colouredLine lineColour xs = (fromVertices $ map p2 xs) # lw 0.0001 # lc lineColour
+> colouredLine :: Double -> Colour Double -> [(Double, Double)] -> Diag
+> colouredLine thickness lineColour xs = (fromVertices $ map p2 xs) #
+>                                        lw thickness #
+>                                        lc lineColour
 >
-> bayDots :: [Pair Double] -> Diag
-> bayDots xs = position (zip (map p2 $ map toPair xs) (repeat dot))
->   where dot      = circle 0.001 # fc green # lw 0.0
+> bayDots :: [Pair Double] -> [Double] -> Diag
+> bayDots xs bs = position (zip (map p2 $ map toPair xs) dots)
+>   where dots     = map (\b -> circle 0.0005 # fcA (blend b c1 c2) # lw 0.0) bs
 >         toPair p = (xPair p, yPair p)
+>         c1       = darkgreen  `withOpacity` 0.7
+>         c2       = lightgreen `withOpacity` 0.7
 >
 > getBBs :: BL.ByteString -> BBox (Double, Double)
 > getBBs = runGet $ do
@@ -300,6 +305,7 @@ unnecessary space) until needed.
 > data LotStats = LotStats { usageCount       :: !Int
 >                          , usageMins        :: !Int64
 >                          , usageControlTxt  :: !T.Text
+>                          , usageSpaces      :: !(Maybe Int)
 >                          }
 >   deriving Show
 >
@@ -307,6 +313,7 @@ unnecessary space) until needed.
 > updateStats s1 s2 = LotStats { usageCount = (usageCount s1) + (usageCount s2)
 >                              , usageMins  = (usageMins s1) +  (usageMins s2)
 >                              , usageControlTxt  = usageControlTxt s2
+>                              , usageSpaces = usageSpaces s2
 >                              }
 >
 > bayCountMap :: Map.Map (Pair Double) LotStats
@@ -336,6 +343,7 @@ unnecessary space) until needed.
 >                 delta = LotStats { usageCount = 1
 >                                  , usageMins  = fromIntegral $ paidDurationMins val
 >                                  , usageControlTxt = hoursOfControl val
+>                                  , usageSpaces     = spaces val
 >                                  }
 >         Nil mErr x  -> if BL.null x
 >                        then m
@@ -343,36 +351,39 @@ unnecessary space) until needed.
 >
 >   let bayCountMap' = loop bayCountMap (decode False parkingCashlessCsv)
 >
->   putStrLn $ show bayCountMap'
->
 >   -- Calculate the available parking minutes for a lot on our chosen
 >   -- day (a Thursday).
 >
->   let availableMinsThu :: [Maybe Double]
+>   let vals = Map.elems bayCountMap'
+>
+>       availableMinsThu :: [Maybe Double]
 >       availableMinsThu =
 >         map (fmap fromIntegral) $
 >         map (fmap (!!(fromEnum Thursday))) $
 >         map (flip lookup hoursOfControlTable) $
->         map usageControlTxt $
->         Map.elems bayCountMap'
+>         map usageControlTxt vals
+>
+>       availableMinsThu' :: [Maybe Double]
+>       availableMinsThu' = zipWith f availableMinsThu
+>                                     (map (fmap fromIntegral . usageSpaces) vals)
+>         where
+>           f x y = (*) <$> x <*> y
 >
 >       actualMinsThu :: [Double]
 >       actualMinsThu =
 >         map fromIntegral $
->         map usageMins $
->         Map.elems bayCountMap'
+>         map usageMins vals
 >
 >       usage :: [Maybe Double]
->       usage = zipWith f actualMinsThu availableMinsThu
+>       usage = zipWith f actualMinsThu availableMinsThu'
 >         where
 >           f x y = (/) <$> pure x <*> y
 >
->   mapM_ putStrLn $ map show usage
->
->   error "Stop here"
->
 >   let parkBayCoords :: [Pair Double]
 >       parkBayCoords = Map.keys bayCountMap'
+>
+>   mapM_ putStrLn $ map show parkBayCoords
+>   mapM_ putStrLn $ map show usage
 >
 >   fs <- getDirectoryContents $ prefix </> dataDir </> borough
 >   let gs = map (uncurry addExtension) $
@@ -391,12 +402,12 @@ unnecessary space) until needed.
 >
 >   let xs = zipWith getRecs nsGL (map shpRecData recsFiltered)
 >       f (_, _, _, _, ps) = ps
->       p = map (colouredLine blue . f) xs
+>       p = map (colouredLine 0.0001 blue . f) xs
 >
 >   defaultMain $
->     mconcat (zipWith colouredLine (cycle [red, yellow]) (map snd rps)) <>
+>     mconcat (zipWith (colouredLine 0.0005) (cycle [red, yellow]) (map snd rps)) <>
 >     mconcat p <>
->     bayDots parkBayCoords
+>     bayDots parkBayCoords (map fromJust usage)
 
 http://www.bbc.co.uk/news/uk-england-london-19732371
 
