@@ -67,9 +67,14 @@ First some pragmas and imports.
 > import Data.Traversable ( Traversable )
 > import qualified Data.Traversable as Tr
 > import Data.Foldable ( Foldable )
->
+
+A type synonym to make typing some of our functions a bit more
+readable (and easier to modify e.g. if we want to use Cairo).
+
 > type Diag = Diagram SVG R2
->
+
+The paths to all our data.
+
 > prefix :: FilePath
 > prefix = "/Users/dom"
 >
@@ -87,12 +92,176 @@ First some pragmas and imports.
 >
 > flParkingCashless :: FilePath
 > flParkingCashless = "ParkingCashlessDenorm.csv"
+
+The data for payments are contained in a CSV file so we create a
+record in which to keep the various fields contained therein.
+
+> data Payment = Payment
+>                { _amountPaid       :: LaxDouble
+>                ,  paidDurationMins :: Int
+>                ,  startDate        :: UTCTime
+>                , _startDay         :: DayOfTheWeek
+>                , _endDate          :: UTCTime
+>                , _endDay           :: DayOfTheWeek
+>                , _startTime        :: TimeOfDay
+>                , _endTime          :: TimeOfDay
+>                , _designationType  :: T.Text
+>                ,  hoursOfControl   :: T.Text
+>                , _tariff           :: T.Text
+>                , _maxStay          :: T.Text
+>                , spaces            :: Maybe Int
+>                , _street           :: T.Text
+>                , _xCoordinate      :: Maybe Double
+>                , _yCoordinate      :: Maybe Double
+>                , latitude          :: Maybe Double
+>                , longitude         :: Maybe LaxDouble
+>                }
+>   deriving Show
 >
+> data DayOfTheWeek = Monday
+>                   | Tuesday
+>                   | Wednesday
+>                   | Thursday
+>                   | Friday
+>                   | Saturday
+>                   | Sunday
+>   deriving (Read, Show, Enum)
+
+We need to be able to parse the day of the week.
+
+> instance FromField DayOfTheWeek where
+>   parseField s = read <$> parseField s
+
+The field containing the longitude has values of the form -.1. The CSV
+parser for *Double* will reject this so we create our own datatype
+with a more relaxed parser.
+
+> newtype LaxDouble = LaxDouble { laxDouble :: Double }
+>   deriving Show
+>
+> instance FromField LaxDouble where
+>   parseField = fmap LaxDouble . parseField . addLeading
+>
+>     where
+>
+>       addLeading :: B.ByteString -> B.ByteString
+>       addLeading bytes =
+>             case B.uncons bytes of
+>               Just (c -> '.', _)    -> B.cons (o '0') bytes
+>               Just (c -> '-', rest) -> B.cons (o '-') (addLeading rest)
+>               _ -> bytes
+>
+>       c = chr . fromIntegral
+>       o = fromIntegral . ord
+
+We need to be able to parse dates and times.
+
+> instance FromField UTCTime where
+>   parseField s = do
+>     f <- parseField s
+>     case parseTime defaultTimeLocale "%F %X" f of
+>       Nothing -> fail "Unable to parse UTC time"
+>       Just g  -> return g
+>
+> instance FromField TimeOfDay where
+>   parseField s = do
+>     f <- parseField s
+>     case parseTime defaultTimeLocale "%R" f of
+>       Nothing -> fail "Unable to parse time of day"
+>       Just g  -> return g
+
+Finally we can write a parser for our record.
+
+> instance FromRecord Payment where
+>   parseRecord v
+>          | V.length v == 18
+>          = Payment <$>
+>            v .!  0 <*>
+>            v .!  1 <*>
+>            v .!  2 <*>
+>            v .!  3 <*>
+>            v .!  4 <*>
+>            v .!  5 <*>
+>            v .!  6 <*>
+>            v .!  7 <*>
+>            v .!  8 <*>
+>            v .!  9 <*>
+>            v .! 10 <*>
+>            v .! 11 <*>
+>            v .! 12 <*>
+>            v .! 13 <*>
+>            v .! 14 <*>
+>            v .! 15 <*>
+>            v .! 16 <*>
+>            v .! 17
+>          | otherwise     = mzero
+
+To make the analysis simpler, we only look at what might be a typical
+day, a Thursday in February.
+
 > selectedDay :: UTCTime
 > selectedDay = case parseTime defaultTimeLocale "%F %X" "2013-02-28 00:00:00" of
 >   Nothing -> error "Unable to parse UTC time"
 >   Just t  -> t
+
+It turns out that there are a very limited number of different sorts
+of hours of control so rather than parse this and calculate the number
+of control minutes per week, we can just create a simple look up table
+by hand.
+
+> hoursOfControlTable :: [(T.Text, [Int])]
+> hoursOfControlTable = [
+>     ("Mon - Fri 8.30am - 6.30pm"                      , [600, 600, 600, 600, 600,   0,   0])
+>   , ("Mon-Fri 10am - 4pm"                             , [360, 360, 360, 360, 360,   0,   0])
+>   , ("Mon - Fri 8.30-6.30 Sat 8.30 - 1.30"            , [600, 600, 600, 600, 600, 300,   0])
+>   , ("Mon - Sat 8.30am - 6.30pm"                      , [600, 600, 600, 600, 600, 600,   0])
+>   , ("Mon-Sat 11am-6.30pm "                           , [450, 450, 450, 450, 450, 450,   0])
+>   , ("Mon - Fri 8.00pm - 8.00am"                      , [720, 720, 720, 720, 720,   0,   0])
+>   , ("Mon - Fri 8.30am - 6.30pm "                     , [600, 600, 600, 600, 600,   0,   0])
+>   , ("Mon - Fri 10.00am - 6.30pm\nSat 8.30am - 6.30pm", [510, 510, 510, 510, 510, 600,   0])
+>   , ("Mon-Sun 10.00am-4.00pm & 7.00pm - Midnight"     , [660, 660, 660, 660, 660, 660, 660])
+>   ]
+
+Now we create a record in which to record the statistics in which we are interested:
+
+* Number of times a lot is used.
+
+* Number of usage minutes. In reality this is the amount of minutes
+purchased and people often leave a bay before their ticket expires so
+this is just a proxy.
+
+* The hourse of control for the lot.
+
+* The number of bays in the lot.
+
+N.B. The !'s are *really* important otherwise we get a space leak. In
+more detail, these are strictness annotations which force the record
+to be evaluated rather than be carried around unevaluated (taking up
+unnecessary space) until needed.
+
+> data LotStats = LotStats { usageCount       :: !Int
+>                          , usageMins        :: !Int64
+>                          , usageControlTxt  :: !T.Text
+>                          , usageSpaces      :: !(Maybe Int)
+>                          }
+>   deriving Show
+
+As we work our way through the data we need to update our statistics.
+
+> updateStats :: LotStats -> LotStats -> LotStats
+> updateStats s1 s2 = LotStats { usageCount = (usageCount s1) + (usageCount s2)
+>                              , usageMins  = (usageMins s1) +  (usageMins s2)
+>                              , usageControlTxt  = usageControlTxt s2
+>                              , usageSpaces = usageSpaces s2
+>                              }
 >
+> initBayCountMap :: Map.Map (Pair Double) LotStats
+> initBayCountMap = Map.empty
+
+
+We are going to be working with co-ordinates which are pairs of
+numbers so we need a data type in which to keep them.
+
 > data Pair a = Pair { xPair :: !a, yPair :: !a }
 >   deriving (Show, Eq, Ord, Functor, Foldable, Traversable)
 >
@@ -177,156 +346,7 @@ First some pragmas and imports.
 >   let (_, _, _, _, ps)  = head $ zipWith getRecs ns  (map shpRecData recs)
 >   return $ (recsOfInterest bb recDB, (ps, bb))
 >
-> _columnNames :: [String]
-> _columnNames = [ "amount paid"
->                , "paid duration mins"
->                , "start date"
->                , "start day"
->                , "end date"
->                , "end day"
->                , "start time"
->                , "end time"
->                , "DesignationType"
->                , "Hours of Control"
->                , "Tariff"
->                , "Max Stay"
->                , "Spaces"
->                , "Street"
->                , "x coordinate"
->                , "y coordinate"
->                , "latitude"
->                , "longitude"
->                ]
->
-> data DayOfTheWeek = Monday
->                   | Tuesday
->                   | Wednesday
->                   | Thursday
->                   | Friday
->                   | Saturday
->                   | Sunday
->   deriving (Read, Show, Enum)
->
-> instance FromField DayOfTheWeek where
->   parseField s = read <$> parseField s
->
-> newtype LaxDouble = LaxDouble { laxDouble :: Double }
->   deriving Show
->
-> instance FromField LaxDouble where
->   parseField = fmap LaxDouble . parseField . addLeading
->
->     where
->
->       addLeading :: B.ByteString -> B.ByteString
->       addLeading bytes =
->             case B.uncons bytes of
->               Just (c -> '.', _)    -> B.cons (o '0') bytes
->               Just (c -> '-', rest) -> B.cons (o '-') (addLeading rest)
->               _ -> bytes
->
->       c = chr . fromIntegral
->       o = fromIntegral . ord
->
-> data Payment = Payment
->                { _amountPaid       :: LaxDouble
->                ,  paidDurationMins :: Int
->                ,  startDate        :: UTCTime
->                , _startDay         :: DayOfTheWeek
->                , _endDate          :: UTCTime
->                , _endDay           :: DayOfTheWeek
->                , _startTime        :: TimeOfDay
->                , _endTime          :: TimeOfDay
->                , _designationType  :: T.Text
->                ,  hoursOfControl   :: T.Text
->                , _tariff           :: T.Text
->                , _maxStay          :: T.Text
->                , spaces            :: Maybe Int
->                , _street           :: T.Text
->                , _xCoordinate      :: Maybe Double
->                , _yCoordinate      :: Maybe Double
->                , latitude          :: Maybe Double
->                , longitude         :: Maybe LaxDouble
->                }
->   deriving Show
->
-> instance FromRecord Payment where
->   parseRecord v
->          | V.length v == 18
->          = Payment <$>
->            v .!  0 <*>
->            v .!  1 <*>
->            v .!  2 <*>
->            v .!  3 <*>
->            v .!  4 <*>
->            v .!  5 <*>
->            v .!  6 <*>
->            v .!  7 <*>
->            v .!  8 <*>
->            v .!  9 <*>
->            v .! 10 <*>
->            v .! 11 <*>
->            v .! 12 <*>
->            v .! 13 <*>
->            v .! 14 <*>
->            v .! 15 <*>
->            v .! 16 <*>
->            v .! 17
->          | otherwise     = mzero
->
-> instance FromField UTCTime where
->   parseField s = do
->     f <- parseField s
->     case parseTime defaultTimeLocale "%F %X" f of
->       Nothing -> fail "Unable to parse UTC time"
->       Just g  -> return g
->
-> instance FromField TimeOfDay where
->   parseField s = do
->     f <- parseField s
->     case parseTime defaultTimeLocale "%R" f of
->       Nothing -> fail "Unable to parse time of day"
->       Just g  -> return g
 
-It turns out that there are a very limited number of different sorts
-of hours of control so rather than parse this and calculate the number
-of control minutes per week, we can just create a simple look up table
-by hand.
-
-> hoursOfControlTable :: [(T.Text, [Int])]
-> hoursOfControlTable = [
->     ("Mon - Fri 8.30am - 6.30pm"                      , [600, 600, 600, 600, 600,   0,   0])
->   , ("Mon-Fri 10am - 4pm"                             , [360, 360, 360, 360, 360,   0,   0])
->   , ("Mon - Fri 8.30-6.30 Sat 8.30 - 1.30"            , [600, 600, 600, 600, 600, 300,   0])
->   , ("Mon - Sat 8.30am - 6.30pm"                      , [600, 600, 600, 600, 600, 600,   0])
->   , ("Mon-Sat 11am-6.30pm "                           , [450, 450, 450, 450, 450, 450,   0])
->   , ("Mon - Fri 8.00pm - 8.00am"                      , [720, 720, 720, 720, 720,   0,   0])
->   , ("Mon - Fri 8.30am - 6.30pm "                     , [600, 600, 600, 600, 600,   0,   0])
->   , ("Mon - Fri 10.00am - 6.30pm\nSat 8.30am - 6.30pm", [510, 510, 510, 510, 510, 600,   0])
->   , ("Mon-Sun 10.00am-4.00pm & 7.00pm - Midnight"     , [660, 660, 660, 660, 660, 660, 660])
->   ]
-
-The !'s are *really* important otherwise we get a space leak. In more
-detail, these are strictness annotations which force the record to be
-evaluated rather than be carried around unevaluated (taking up
-unnecessary space) until needed.
-
-> data LotStats = LotStats { usageCount       :: !Int
->                          , usageMins        :: !Int64
->                          , usageControlTxt  :: !T.Text
->                          , usageSpaces      :: !(Maybe Int)
->                          }
->   deriving Show
->
-> updateStats :: LotStats -> LotStats -> LotStats
-> updateStats s1 s2 = LotStats { usageCount = (usageCount s1) + (usageCount s2)
->                              , usageMins  = (usageMins s1) +  (usageMins s2)
->                              , usageControlTxt  = usageControlTxt s2
->                              , usageSpaces = usageSpaces s2
->                              }
->
-> bayCountMap :: Map.Map (Pair Double) LotStats
-> bayCountMap = Map.empty
 >
 > main :: IO ()
 > main = do
@@ -358,12 +378,12 @@ unnecessary space) until needed.
 >                        then m
 >                        else error $ "Nil: " ++ show mErr ++ " " ++ show x
 >
->   let bayCountMap' = loop bayCountMap (decode False parkingCashlessCsv)
+>   let bayCountMap = loop initBayCountMap (decode False parkingCashlessCsv)
 >
 >   -- Calculate the available parking minutes for a lot on our chosen
 >   -- day (a Thursday).
 >
->   let vals = Map.elems bayCountMap'
+>   let vals = Map.elems bayCountMap
 >
 >       availableMinsThu :: [Maybe Double]
 >       availableMinsThu =
@@ -389,7 +409,7 @@ unnecessary space) until needed.
 >           f x y = (/) <$> pure x <*> y
 >
 >   let parkBayCoords :: [Pair Double]
->       parkBayCoords = Map.keys bayCountMap'
+>       parkBayCoords = Map.keys bayCountMap
 >
 >   mapM_ putStrLn $ map show parkBayCoords
 >   mapM_ putStrLn $ map show usage
