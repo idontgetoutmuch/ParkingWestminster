@@ -75,6 +75,21 @@ readable (and easier to modify e.g. if we want to use Cairo).
 
 The paths to all our data.
 
+SHP files are [shape files](http://en.wikipedia.org/wiki/Shapefile), a
+fairly old but widespread map data format that was originally produced
+by a company called ESRI.
+
+The
+[polygons](http://data.london.gov.uk/datastore/package/i-trees-canopy-ward-data)
+for the outline of the wards in Westminster. Surely there is a better
+place to get this rather than using tree canopy data.
+
+The [polyline
+data](http://download.geofabrik.de/europe/great-britain.html) for all
+the roads (and other stuff) in the UK. We selected out all the roads
+in a bounding box for London. Even so plotting these takes about a
+minute.
+
 > prefix :: FilePath
 > prefix = "/Users/dom"
 >
@@ -298,17 +313,6 @@ numbers so we need a data type in which to keep them.
 >   points <- replicateM (fromIntegral nPoints) (getPair getFloat64le)
 >   return (bb, nParts, nPoints, parts, points)
 >
-> colouredLine :: Double -> Colour Double -> [(Double, Double)] -> Diag
-> colouredLine thickness lineColour xs = (fromVertices $ map p2 xs) #
->                                        lw thickness #
->                                        lc lineColour
->
-> bayDots :: [Pair Double] -> [Double] -> Diag
-> bayDots xs bs = position (zip (map p2 $ map toPair xs) dots)
->   where dots     = map (\b -> circle 0.0005 # fcA (blend b c1 c2) # lw 0.0) bs
->         toPair p = (xPair p, yPair p)
->         c1       = darkgreen  `withOpacity` 0.7
->         c2       = lightgreen `withOpacity` 0.7
 >
 > getBBs :: BL.ByteString -> BBox (Double, Double)
 > getBBs = runGet $ do
@@ -346,7 +350,17 @@ numbers so we need a data type in which to keep them.
 >   let (_, _, _, _, ps)  = head $ zipWith getRecs ns  (map shpRecData recs)
 >   return $ (recsOfInterest bb recDB, (ps, bb))
 >
-
+> colouredLine :: Double -> Colour Double -> [(Double, Double)] -> Diag
+> colouredLine thickness lineColour xs = (fromVertices $ map p2 xs) #
+>                                        lw thickness #
+>                                        lc lineColour
+>
+> bayDots :: [Pair Double] -> [Double] -> Diag
+> bayDots xs bs = position (zip (map p2 $ map toPair xs) dots)
+>   where dots     = map (\b -> circle 0.0005 # fcA (blend b c1 c2) # lw 0.0) bs
+>         toPair p = (xPair p, yPair p)
+>         c1       = darkgreen  `withOpacity` 0.7
+>         c2       = lightgreen `withOpacity` 0.7
 >
 > main :: IO ()
 > main = do
