@@ -9,6 +9,11 @@ Hackathon](http://futurecitieshackathon.com) along with
 * [Ian Ozsvald](https://twitter.com/ianozsvald)
 * Mateusz Łapsa-Malawski
 
+Apparently in the world of car parking where Westminster leads the
+rest of UK follows. For example Westminster is rolling out [individual
+parking bay
+monitors](http://www.bbc.co.uk/news/uk-england-london-19732371).
+
 Our analysis gained an honourable mention. Ian has produced a great
 [write-up](http://ianozsvald.com/2013/10/07/future-cities-hackathon-ds_ldn-oct-2013-on-parking-usage-inefficiencies)
 of our analysis with fine watercolour maps and Bart's time-lapse video
@@ -53,6 +58,7 @@ First some pragmas and imports.
 > import qualified Data.Map.Strict as Map
 > import Data.Int( Int64 )
 > import Data.Maybe ( fromJust, isNothing )
+> import Data.List ( unfoldr )
 >
 > import Control.Applicative
 > import Control.Monad
@@ -75,16 +81,16 @@ readable (and easier to modify e.g. if we want to use Cairo).
 
 The paths to all our data.
 
-SHP files are [shape files](http://en.wikipedia.org/wiki/Shapefile), a
-fairly old but widespread map data format that was originally produced
-by a company called ESRI.
+* SHP files are [shape files](http://en.wikipedia.org/wiki/Shapefile),
+a fairly old but widespread map data format that was originally
+produced by a company called ESRI.
 
-The
+* The
 [polygons](http://data.london.gov.uk/datastore/package/i-trees-canopy-ward-data)
 for the outline of the wards in Westminster. Surely there is a better
 place to get this rather than using tree canopy data.
 
-The [polyline
+* The [polyline
 data](http://download.geofabrik.de/europe/great-britain.html) for all
 the roads (and other stuff) in the UK. We selected out all the roads
 in a bounding box for London. Even so plotting these takes about a
@@ -106,7 +112,7 @@ minute.
 > flGL = prefix </> dataDir </> "GreaterLondonRoads.shp"
 >
 > flParkingCashless :: FilePath
-> flParkingCashless = "ParkingCashlessDenorm.csv"
+> flParkingCashless = "ParkingCashlessDenormHead.csv"
 
 The data for payments are contained in a CSV file so we create a
 record in which to keep the various fields contained therein.
@@ -245,7 +251,7 @@ Now we create a record in which to record the statistics in which we are interes
 purchased and people often leave a bay before their ticket expires so
 this is just a proxy.
 
-* The hourse of control for the lot.
+* The hours of control for the lot.
 
 * The number of bays in the lot.
 
@@ -273,7 +279,6 @@ As we work our way through the data we need to update our statistics.
 > initBayCountMap :: Map.Map (Pair Double) LotStats
 > initBayCountMap = Map.empty
 
-
 We are going to be working with co-ordinates which are pairs of
 numbers so we need a data type in which to keep them.
 
@@ -297,22 +302,28 @@ numbers so we need a data type in which to keep them.
 >   shpFileBBox <- getBBox (getPair getFloat64le)
 >   return shpFileBBox
 >
-> getRecs :: t -> BL.ByteString ->
+> getRecs :: BL.ByteString ->
 >            (BBox (Double, Double),
 >             Word32,
 >             Word32,
 >             [Word32],
->             [(Double, Double)])
-> getRecs _n = runGet $ do
+>             [[(Double, Double)]])
+> getRecs = runGet $ do
 >   _ <- getShapeType32le
 >   bb <- myBBox
->   -- FIXME: But what if there is more than one part? This will FAIL!!!
 >   nParts <- getWord32le
 >   nPoints <- getWord32le
 >   parts <- replicateM (fromIntegral nParts) getWord32le
 >   points <- replicateM (fromIntegral nPoints) (getPair getFloat64le)
->   return (bb, nParts, nPoints, parts, points)
+>   return (bb, nParts, nPoints, parts, (getParts (map fromIntegral parts) points))
 >
+> getParts :: [Int] -> [a] -> [[a]]
+> getParts offsets ps = unfoldr g (gaps, ps)
+>   where
+>     gaps = zipWith (-) (tail offsets) offsets
+>     g (  [],   []) = Nothing
+>     g (  [],   xs) = Just (xs, ([], []))
+>     g (n:ns,   xs) = Just (take n xs, (ns, drop n xs))
 >
 > getBBs :: BL.ByteString -> BBox (Double, Double)
 > getBBs = runGet $ do
@@ -341,13 +352,12 @@ numbers so we need a data type in which to keep them.
 > recsOfInterest :: BBox (Double, Double) -> [ShpRec] -> [ShpRec]
 > recsOfInterest bb = filter (flip isInBB bb . getBBs . shpRecData)
 >
-> processWard :: [ShpRec] -> FilePath -> IO ([ShpRec], ([(Double, Double)], BBox (Double, Double)))
+> processWard :: [ShpRec] -> FilePath -> IO ([ShpRec], ([[(Double, Double)]], BBox (Double, Double)))
 > processWard recDB fileName = do
 >   input <- BL.readFile $ prefix </> dataDir </> borough </> fileName
 >   let (hdr, recs) = runGet getShpFile input
->       ns          = map (shpRecSizeBytes . shpRecHdr) $ recs
 >       bb          = shpFileBBox hdr
->   let (_, _, _, _, ps)  = head $ zipWith getRecs ns  (map shpRecData recs)
+>   let (_, _, _, _, ps)  = head $ map getRecs (map shpRecData recs)
 >   return $ (recsOfInterest bb recDB, (ps, bb))
 >
 > colouredLine :: Double -> Colour Double -> [(Double, Double)] -> Diag
@@ -375,10 +385,6 @@ numbers so we need a data type in which to keep them.
 >           Left err ->  error err
 >           Right val -> case Tr.sequence $ Pair (laxDouble <$> longitude val) (latitude val) of
 >             Nothing -> loop m rest
->
->             -- If the latitude and longitude were recorded then we can update our
->             -- stats. To make the analysis simpler, we only record a single day.
->
 >             Just v  -> if startDate val == selectedDay
 >                        then loop (Map.insertWith updateStats v delta m) rest
 >                        else loop m rest
@@ -428,38 +434,61 @@ numbers so we need a data type in which to keep them.
 >   mapM_ putStrLn $ map show parkBayCoords
 >   mapM_ putStrLn $ map show usage
 >
+
+Get the ward shape files.
+
 >   fs <- getDirectoryContents $ prefix </> dataDir </> borough
->   let gs = map (uncurry addExtension) $
+>   let wardShpFiles = map (uncurry addExtension) $
 >            filter ((==".shp"). snd) $
 >            map splitExtension fs
->   putStrLn $ show gs
->
+>   putStrLn $ show wardShpFiles
+
+Get the London roads shape file.
+
 >   inputGL <- BL.readFile flGL
 >   let (hdrGL, recsGL) = runGet getShpFile inputGL
->       nsGL            = map (shpRecSizeBytes . shpRecHdr) recsGL
 >   putStrLn $ show $ shpFileBBox hdrGL
->
->   rps <- mapM (processWard recsGL) gs
->
->   let bbWestminster = foldr makeBorder (BBox (read "Infinity", read "Infinity") (read "-Infinity", read "-Infinity")) $ map (snd . snd) rps
->
->   putStrLn $ show bbWestminster
+
+Get the data we wish to plot from each ward shape file.
+
+>   rps <- mapM (processWard recsGL) wardShpFiles
+
+Get the roads inside the wards.
+
+>   let zs = map (f . getRecs . shpRecData) $ concat $ map fst rps
+>         where
+>           f (_, _, _, _, x5) = x5
+
+And create blue diagram elements for each road.
+
+>       ps :: [[Diag]]
+>       ps = map (map (colouredLine 0.0001 blue)) zs
+
+Create diagrame elements for each ward boundary.
+
+>       qs :: [[Diag]]
+>       qs = map (map (colouredLine 0.0003 navajowhite)) (map (fst. snd) rps)
+
+Westminster is located at about 51 degrees North. We want to put a
+background colour on the map so either we need to move Westminster to
+be at the origin or create a background rectangle centred on
+Westminster. We do the former. We create a rectangle which is slightly
+bigger than the bounding box of Westminster. And we translate
+everything so that the South West corner of the bounding box of
+Westminster is the origin.
+
+>   let bbWestminster = foldr makeBorder (BBox (inf, inf) (negInf, negInf)) $
+>                       map (snd . snd) rps
+>         where
+>           inf     = read "Infinity"
+>           negInf  = read "-Infinity"
 >
 >   let (ea, sa) = bbMin bbWestminster
 >       (wa, na) = bbMax bbWestminster
 >       wmHeight = na - sa
 >       wmWidth  = wa - ea
 >
->   putStrLn $ show wmWidth
->   putStrLn $ show wmHeight
->
->   let recsFiltered = concat $ map fst rps
->
->   let xs = zipWith getRecs nsGL (map shpRecData recsFiltered)
->       f (_, _, _, _, ps) = ps
->       p = map (colouredLine 0.0001 blue . f) xs
->
->   let wmBackground = translateX (wmWidth / 2.0) $
+>       wmBackground = translateX (wmWidth / 2.0) $
 >                      translateY (wmHeight / 2.0) $
 >                      scaleX 1.1 $
 >                      scaleY 1.1 $
@@ -467,19 +496,21 @@ numbers so we need a data type in which to keep them.
 >
 >       wmStreets =  translateX (negate ea) $
 >                    translateY (negate sa) $
->                    mconcat p
+>                    mconcat (mconcat ps)
 >
 >       wmParking = translateX (negate ea) $
 >                   translateY (negate sa) $
 >                   bayDots parkBayCoords (map fromJust usage)
 >
+>       wmWards = translateX (negate ea) $
+>                 translateY (negate sa) $
+>                 mconcat (mconcat qs)
+>
 >   defaultMain $
->     wmBackground
->     <> translateX (negate ea) (translateY (negate sa) (mconcat (zipWith (colouredLine 0.0003) (repeat navajowhite) (map (fst . snd) rps))))
+>        wmBackground
+>     <> wmWards
 >     <> wmStreets
 >     <> wmParking
-
-http://www.bbc.co.uk/news/uk-england-london-19732371
 
 Observations
 ============
