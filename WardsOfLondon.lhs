@@ -155,18 +155,27 @@ First some pragmas and imports.
 >     (eb, sb) = bbMin bby
 >     (wb, nb) = bbMax bby
 >
+> makeBorder :: (Ord a, Ord b) => BBox (a, b) -> BBox (a, b) -> BBox (a, b)
+> makeBorder bbx bby = BBox { bbMin = (min ea eb, min sa sb)
+>                           , bbMax = (max wa wb, max na nb)
+>                           }
+>   where
+>     (ea, sa) = bbMin bbx
+>     (wa, na) = bbMax bbx
+>     (eb, sb) = bbMin bby
+>     (wb, nb) = bbMax bby
+>
 > recsOfInterest :: BBox (Double, Double) -> [ShpRec] -> [ShpRec]
 > recsOfInterest bb = filter (flip isInBB bb . getBBs . shpRecData)
 >
-> processWard :: [ShpRec] -> FilePath -> IO ([ShpRec], [(Double, Double)])
+> processWard :: [ShpRec] -> FilePath -> IO ([ShpRec], ([(Double, Double)], BBox (Double, Double)))
 > processWard recDB fileName = do
 >   input <- BL.readFile $ prefix </> dataDir </> borough </> fileName
 >   let (hdr, recs) = runGet getShpFile input
 >       ns          = map (shpRecSizeBytes . shpRecHdr) $ recs
 >       bb          = shpFileBBox hdr
->   putStrLn $ show bb
 >   let (_, _, _, _, ps)  = head $ zipWith getRecs ns  (map shpRecData recs)
->   return $ (recsOfInterest bb recDB, ps)
+>   return $ (recsOfInterest bb recDB, (ps, bb))
 >
 > _columnNames :: [String]
 > _columnNames = [ "amount paid"
@@ -398,16 +407,43 @@ unnecessary space) until needed.
 >
 >   rps <- mapM (processWard recsGL) gs
 >
+>   let bbWestminster = foldr makeBorder (BBox (read "Infinity", read "Infinity") (read "-Infinity", read "-Infinity")) $ map (snd . snd) rps
+>
+>   putStrLn $ show bbWestminster
+>
+>   let (ea, sa) = bbMin bbWestminster
+>       (wa, na) = bbMax bbWestminster
+>       wmHeight = na - sa
+>       wmWidth  = wa - ea
+>
+>   putStrLn $ show wmWidth
+>   putStrLn $ show wmHeight
+>
 >   let recsFiltered = concat $ map fst rps
 >
 >   let xs = zipWith getRecs nsGL (map shpRecData recsFiltered)
 >       f (_, _, _, _, ps) = ps
 >       p = map (colouredLine 0.0001 blue . f) xs
 >
+>   let wmBackground = translateX (wmWidth / 2.0) $
+>                      translateY (wmHeight / 2.0) $
+>                      scaleX 1.1 $
+>                      scaleY 1.1 $
+>                      rect wmWidth wmHeight # fcA (yellow `withOpacity` 0.1) # lw 0.0
+>
+>       wmStreets =  translateX (negate ea) $
+>                    translateY (negate sa) $
+>                    mconcat p
+>
+>       wmParking = translateX (negate ea) $
+>                   translateY (negate sa) $
+>                   bayDots parkBayCoords (map fromJust usage)
+>
 >   defaultMain $
->     mconcat (zipWith (colouredLine 0.0005) (cycle [red, yellow]) (map snd rps)) <>
->     mconcat p <>
->     bayDots parkBayCoords (map fromJust usage)
+>     wmBackground
+>     <> translateX (negate ea) (translateY (negate sa) (mconcat (zipWith (colouredLine 0.0003) (repeat navajowhite) (map (fst . snd) rps))))
+>     <> wmStreets
+>     <> wmParking
 
 http://www.bbc.co.uk/news/uk-england-london-19732371
 
