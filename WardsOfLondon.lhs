@@ -1,3 +1,6 @@
+% Parking in Westminter: An Analysis in Haskell
+% Dominic Steinitz
+% 23rd October 2013
 
 I had a fun weekend analysing car parking data in
 [Westminster](http://www.westminster.gov.uk) at the [Future Cities
@@ -40,7 +43,7 @@ First some pragmas and imports.
 > {-# LANGUAGE DeriveFoldable              #-}
 > {-# LANGUAGE DeriveFunctor               #-}
 >
-> module Main (main) where
+> module WardsOfLondon ( parkingDia ) where
 >
 > import Database.Shapefile
 >
@@ -48,7 +51,6 @@ First some pragmas and imports.
 > import qualified Data.ByteString.Lazy as BL
 > import qualified Data.ByteString as B
 > import Data.Binary.IEEE754
-> import Data.Word ( Word32 )
 > import Data.Csv hiding ( decode, lookup )
 > import Data.Csv.Streaming
 > import qualified Data.Vector as V
@@ -57,18 +59,19 @@ First some pragmas and imports.
 > import Data.Char
 > import qualified Data.Map.Strict as Map
 > import Data.Int( Int64 )
-> import Data.Maybe ( fromJust, isNothing )
+> import Data.Maybe ( fromJust, isJust )
 > import Data.List ( unfoldr )
 >
 > import Control.Applicative
 > import Control.Monad
 >
 > import Diagrams.Prelude
-> import Diagrams.Backend.SVG.CmdLine
+> import Diagrams.Backend.Cairo.CmdLine
 >
 > import System.FilePath
 > import System.Directory
 > import System.Locale
+> import System.IO.Unsafe ( unsafePerformIO )
 >
 > import Data.Traversable ( Traversable )
 > import qualified Data.Traversable as Tr
@@ -77,7 +80,7 @@ First some pragmas and imports.
 A type synonym to make typing some of our functions a bit more
 readable (and easier to modify e.g. if we want to use Cairo).
 
-> type Diag = Diagram SVG R2
+> type Diag = Diagram Cairo R2
 
 The paths to all our data.
 
@@ -96,6 +99,10 @@ the roads (and other stuff) in the UK. We selected out all the roads
 in a bounding box for London. Even so plotting these takes about a
 minute.
 
+* The parking data were provided by Westminster Council. The set we
+consider below was about 4 million lines of cashless parking meter
+payments (about 1.3G).
+
 > prefix :: FilePath
 > prefix = "/Users/dom"
 >
@@ -112,7 +119,7 @@ minute.
 > flGL = prefix </> dataDir </> "GreaterLondonRoads.shp"
 >
 > flParkingCashless :: FilePath
-> flParkingCashless = "ParkingCashlessDenormHead.csv"
+> flParkingCashless = "ParkingCashlessDenorm.csv"
 
 The data for payments are contained in a CSV file so we create a
 record in which to keep the various fields contained therein.
@@ -215,7 +222,7 @@ Finally we can write a parser for our record.
 >            v .! 15 <*>
 >            v .! 16 <*>
 >            v .! 17
->          | otherwise     = mzero
+>          | otherwise = mzero
 
 To make the analysis simpler, we only look at what might be a typical
 day, a Thursday in February.
@@ -280,11 +287,14 @@ As we work our way through the data we need to update our statistics.
 > initBayCountMap = Map.empty
 
 We are going to be working with co-ordinates which are pairs of
-numbers so we need a data type in which to keep them.
+numbers so we need a data type in which to keep them. Possibly
+overkill.
 
 > data Pair a = Pair { xPair :: !a, yPair :: !a }
 >   deriving (Show, Eq, Ord, Functor, Foldable, Traversable)
->
+
+Functions to get bounding boxes.
+
 > getPair :: Get a -> Get (a,a)
 > getPair getPart = do
 >     x <- getPart
@@ -297,38 +307,15 @@ numbers so we need a data type in which to keep them.
 >     bbMax <- getPoint
 >     return (BBox bbMin bbMax)
 >
-> myBBox :: Get (BBox (Double, Double))
-> myBBox = do
+> bbox :: Get (BBox (Double, Double))
+> bbox = do
 >   shpFileBBox <- getBBox (getPair getFloat64le)
 >   return shpFileBBox
->
-> getRecs :: BL.ByteString ->
->            (BBox (Double, Double),
->             Word32,
->             Word32,
->             [Word32],
->             [[(Double, Double)]])
-> getRecs = runGet $ do
->   _ <- getShapeType32le
->   bb <- myBBox
->   nParts <- getWord32le
->   nPoints <- getWord32le
->   parts <- replicateM (fromIntegral nParts) getWord32le
->   points <- replicateM (fromIntegral nPoints) (getPair getFloat64le)
->   return (bb, nParts, nPoints, parts, (getParts (map fromIntegral parts) points))
->
-> getParts :: [Int] -> [a] -> [[a]]
-> getParts offsets ps = unfoldr g (gaps, ps)
->   where
->     gaps = zipWith (-) (tail offsets) offsets
->     g (  [],   []) = Nothing
->     g (  [],   xs) = Just (xs, ([], []))
->     g (n:ns,   xs) = Just (take n xs, (ns, drop n xs))
 >
 > getBBs :: BL.ByteString -> BBox (Double, Double)
 > getBBs = runGet $ do
 >   _ <- getShapeType32le
->   myBBox
+>   bbox
 >
 > isInBB :: (Ord a, Ord b) => BBox (a, b) -> BBox (a, b) -> Bool
 > isInBB bbx bby = ea >= eb && wa <= wb &&
@@ -339,8 +326,8 @@ numbers so we need a data type in which to keep them.
 >     (eb, sb) = bbMin bby
 >     (wb, nb) = bbMax bby
 >
-> makeBorder :: (Ord a, Ord b) => BBox (a, b) -> BBox (a, b) -> BBox (a, b)
-> makeBorder bbx bby = BBox { bbMin = (min ea eb, min sa sb)
+> combineBBs :: (Ord a, Ord b) => BBox (a, b) -> BBox (a, b) -> BBox (a, b)
+> combineBBs bbx bby = BBox { bbMin = (min ea eb, min sa sb)
 >                           , bbMax = (max wa wb, max na nb)
 >                           }
 >   where
@@ -348,92 +335,136 @@ numbers so we need a data type in which to keep them.
 >     (wa, na) = bbMax bbx
 >     (eb, sb) = bbMin bby
 >     (wb, nb) = bbMax bby
+
+A function to get plotting information from the shape file.
+
+> getRecs :: BL.ByteString ->
+>             [[(Double, Double)]]
+> getRecs = runGet $ do
+>   _ <- getShapeType32le
+>   _ <- bbox
+>   nParts  <- getWord32le
+>   nPoints <- getWord32le
+>   parts   <- replicateM (fromIntegral nParts) getWord32le
+>   points  <- replicateM (fromIntegral nPoints) (getPair getFloat64le)
+>   return (getParts (map fromIntegral parts) points)
 >
+> getParts :: [Int] -> [a] -> [[a]]
+> getParts offsets ps = unfoldr g (gaps, ps)
+>   where
+>     gaps = zipWith (-) (tail offsets) offsets
+>     g (  [],   []) = Nothing
+>     g (  [],   xs) = Just (xs, ([], []))
+>     g (n:ns,   xs) = Just (take n xs, (ns, drop n xs))
+
+We need to be able to filter out e.g. roads that are not in a given bounding box.
+
 > recsOfInterest :: BBox (Double, Double) -> [ShpRec] -> [ShpRec]
 > recsOfInterest bb = filter (flip isInBB bb . getBBs . shpRecData)
->
-> processWard :: [ShpRec] -> FilePath -> IO ([ShpRec], ([[(Double, Double)]], BBox (Double, Double)))
+
+A function to process each ward in Westminster.
+
+> processWard :: [ShpRec] -> FilePath ->
+>                IO ([ShpRec], ([[(Double, Double)]], BBox (Double, Double)))
 > processWard recDB fileName = do
 >   input <- BL.readFile $ prefix </> dataDir </> borough </> fileName
 >   let (hdr, recs) = runGet getShpFile input
 >       bb          = shpFileBBox hdr
->   let (_, _, _, _, ps)  = head $ map getRecs (map shpRecData recs)
+>   let ps  = head $ map getRecs (map shpRecData recs)
 >   return $ (recsOfInterest bb recDB, (ps, bb))
->
+
+We want to draw roads and ward boundaries.
+
 > colouredLine :: Double -> Colour Double -> [(Double, Double)] -> Diag
 > colouredLine thickness lineColour xs = (fromVertices $ map p2 xs) #
 >                                        lw thickness #
 >                                        lc lineColour
->
+
+And we want to draw parking lots with the hue varying according to how
+heavily they are utilised.
+
 > bayDots :: [Pair Double] -> [Double] -> Diag
 > bayDots xs bs = position (zip (map p2 $ map toPair xs) dots)
 >   where dots     = map (\b -> circle 0.0005 # fcA (blend b c1 c2) # lw 0.0) bs
 >         toPair p = (xPair p, yPair p)
 >         c1       = darkgreen  `withOpacity` 0.7
 >         c2       = lightgreen `withOpacity` 0.7
->
-> main :: IO ()
-> main = do
+
+Update the statistics until we run out of data.
+
+> processCsv :: Map.Map (Pair Double) LotStats ->
+>               Records Payment ->
+>               Map.Map (Pair Double) LotStats
+> processCsv m rs = case rs of
+>   Cons u rest -> case u of
+>     Left err ->  error err
+>     Right val -> case Tr.sequence $ Pair (laxDouble <$> longitude val) (latitude val) of
+>       Nothing -> processCsv m rest
+>       Just v  -> if startDate val == selectedDay
+>                  then processCsv (Map.insertWith updateStats v delta m) rest
+>                  else processCsv m rest
+>         where
+>           delta = LotStats { usageCount = 1
+>                            , usageMins  = fromIntegral $ paidDurationMins val
+>                            , usageControlTxt = hoursOfControl val
+>                            , usageSpaces     = spaces val
+>                            }
+>   Nil mErr x  -> if BL.null x
+>                  then m
+>                  else error $ "Nil: " ++ show mErr ++ " " ++ show x
+
+> availableMinsThu :: LotStats -> Maybe Double
+> availableMinsThu val =
+>   fmap fromIntegral $
+>   fmap (!!(fromEnum Thursday)) $
+>   flip lookup hoursOfControlTable $
+>   usageControlTxt val
+
+Now for the main function.
+
+> parkingDiaM :: IO Diag
+> parkingDiaM = do
+
+Read in the 4 million records lazily.
+
 >   parkingCashlessCsv <- BL.readFile $
 >                         prefix </>
 >                         dataDir </>
 >                         parkingBorough </>
 >                         flParkingCashless
+
+Create our statistics.
+
+>   let bayCountMap = processCsv initBayCountMap (decode False parkingCashlessCsv)
 >
->   let loop m rs = case rs of
->         Cons u rest -> case u of
->           Left err ->  error err
->           Right val -> case Tr.sequence $ Pair (laxDouble <$> longitude val) (latitude val) of
->             Nothing -> loop m rest
->             Just v  -> if startDate val == selectedDay
->                        then loop (Map.insertWith updateStats v delta m) rest
->                        else loop m rest
->               where
->                 delta = LotStats { usageCount = 1
->                                  , usageMins  = fromIntegral $ paidDurationMins val
->                                  , usageControlTxt = hoursOfControl val
->                                  , usageSpaces     = spaces val
->                                  }
->         Nil mErr x  -> if BL.null x
->                        then m
->                        else error $ "Nil: " ++ show mErr ++ " " ++ show x
->
->   let bayCountMap = loop initBayCountMap (decode False parkingCashlessCsv)
->
->   -- Calculate the available parking minutes for a lot on our chosen
->   -- day (a Thursday).
->
->   let vals = Map.elems bayCountMap
->
->       availableMinsThu :: [Maybe Double]
->       availableMinsThu =
->         map (fmap fromIntegral) $
->         map (fmap (!!(fromEnum Thursday))) $
->         map (flip lookup hoursOfControlTable) $
->         map usageControlTxt vals
->
->       availableMinsThu' :: [Maybe Double]
->       availableMinsThu' = zipWith f availableMinsThu
+>       vals = Map.elems bayCountMap
+
+Calculate the available minutes for each bay.
+
+>       availableMinsThus :: [Maybe Double]
+>       availableMinsThus = zipWith f (map availableMinsThu vals)
 >                                     (map (fmap fromIntegral . usageSpaces) vals)
 >         where
 >           f x y = (*) <$> x <*> y
->
+
+Calculate the actual minutes used for each lot and the usage which
+determine the hue of the colour of the dot representing the lot on the
+map.
+
 >       actualMinsThu :: [Double]
 >       actualMinsThu =
 >         map fromIntegral $
 >         map usageMins vals
 >
 >       usage :: [Maybe Double]
->       usage = zipWith f actualMinsThu availableMinsThu'
+>       usage = zipWith f actualMinsThu availableMinsThus
 >         where
 >           f x y = (/) <$> pure x <*> y
->
+
+We will need to the co-ordinates of each lot in order to be able to plot it.
+
 >   let parkBayCoords :: [Pair Double]
 >       parkBayCoords = Map.keys bayCountMap
->
->   mapM_ putStrLn $ map show parkBayCoords
->   mapM_ putStrLn $ map show usage
->
 
 Get the ward shape files.
 
@@ -441,13 +472,11 @@ Get the ward shape files.
 >   let wardShpFiles = map (uncurry addExtension) $
 >            filter ((==".shp"). snd) $
 >            map splitExtension fs
->   putStrLn $ show wardShpFiles
 
 Get the London roads shape file.
 
 >   inputGL <- BL.readFile flGL
->   let (hdrGL, recsGL) = runGet getShpFile inputGL
->   putStrLn $ show $ shpFileBBox hdrGL
+>   let recsGL = snd $ runGet getShpFile inputGL
 
 Get the data we wish to plot from each ward shape file.
 
@@ -455,16 +484,14 @@ Get the data we wish to plot from each ward shape file.
 
 Get the roads inside the wards.
 
->   let zs = map (f . getRecs . shpRecData) $ concat $ map fst rps
->         where
->           f (_, _, _, _, x5) = x5
+>   let zs = map (getRecs . shpRecData) $ concat $ map fst rps
 
 And create blue diagram elements for each road.
 
 >       ps :: [[Diag]]
 >       ps = map (map (colouredLine 0.0001 blue)) zs
 
-Create diagrame elements for each ward boundary.
+Create diagram elements for each ward boundary.
 
 >       qs :: [[Diag]]
 >       qs = map (map (colouredLine 0.0003 navajowhite)) (map (fst. snd) rps)
@@ -477,7 +504,7 @@ bigger than the bounding box of Westminster. And we translate
 everything so that the South West corner of the bounding box of
 Westminster is the origin.
 
->   let bbWestminster = foldr makeBorder (BBox (inf, inf) (negInf, negInf)) $
+>   let bbWestminster = foldr combineBBs (BBox (inf, inf) (negInf, negInf)) $
 >                       map (snd . snd) rps
 >         where
 >           inf     = read "Infinity"
@@ -487,30 +514,59 @@ Westminster is the origin.
 >       (wa, na) = bbMax bbWestminster
 >       wmHeight = na - sa
 >       wmWidth  = wa - ea
->
+
+Create the background.
+
 >       wmBackground = translateX (wmWidth / 2.0) $
 >                      translateY (wmHeight / 2.0) $
 >                      scaleX 1.1 $
 >                      scaleY 1.1 $
 >                      rect wmWidth wmHeight # fcA (yellow `withOpacity` 0.1) # lw 0.0
->
+
+Plot the streets.
+
 >       wmStreets =  translateX (negate ea) $
 >                    translateY (negate sa) $
 >                    mconcat (mconcat ps)
->
+
+Plot the parking lots.
+
 >       wmParking = translateX (negate ea) $
 >                   translateY (negate sa) $
->                   bayDots parkBayCoords (map fromJust usage)
->
+>                   uncurry bayDots $
+>                   unzip $
+>                   map (\(x, y) -> (x, fromJust y)) $
+>                   filter (isJust . snd) $
+>                   zip parkBayCoords usage
+
+Plot the ward boundaries.
+
 >       wmWards = translateX (negate ea) $
 >                 translateY (negate sa) $
 >                 mconcat (mconcat qs)
 >
->   defaultMain $
->        wmBackground
->     <> wmWards
->     <> wmStreets
->     <> wmParking
+>   return $ wmBackground <>
+>            wmWards <>
+>            wmStreets <>
+>            wmParking
+
+Sadly we have to use *unsafePerformIO* in order to be able to create
+the post using BlogLiteratelyD.
+
+> parkingDia :: Diag
+> parkingDia = unsafePerformIO parkingDiaM
+
+And now we can see all the parking lots in Westminster as green
+dots. The darkness represents how heavily utilised they are. The thick
+gold lines delineate the wards in Westminster. In case it isn't
+obvious the blue lines are the roads. The Thames, Hyde Park and
+Regent's Park are fairly easy to spot. Less easy to spot but still
+fairly visible are Buckingham Palace and Green Park.
+
+```{.dia width='1200'}
+import WardsOfLondon
+dia = parkingDia
+```
 
 Observations
 ============

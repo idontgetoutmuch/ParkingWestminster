@@ -15,9 +15,9 @@ import pandas as pd
 import numpy as np
 import shapefile
 
-#PARKING_CASHLESS = "ParkingCashlessDenorm100.csv"
-#PARKING_CASHLESS = "ParkingCashlessDenorm100000.csv"
-PARKING_CASHLESS = "ParkingCashlessDenorm.csv"  # 1.4GB of parking data for Westminster
+PARKING_CASHLESS = "ParkingCashlessDenormHead100.csv"
+# PARKING_CASHLESS = "ParkingCashlessDenorm100000.csv"
+# PARKING_CASHLESS = "ParkingCashlessDenorm.csv"  # 1.4GB of parking data for Westminster
 OUTPUT_DIRECTORY = "shapefiles"
 OUTPUT_SHAPEFILE = "coords_augmented"
 
